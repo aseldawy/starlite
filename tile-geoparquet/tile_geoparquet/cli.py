@@ -6,6 +6,7 @@ from .datasource import GeoParquetSource, GeoJSONSource, is_geojson_path
 from .assigner import TileAssignerFromCSV, RSGroveAssigner
 from .orchestrator import RoundOrchestrator
 from .writer_pool import SortMode, SortKey
+from .hist_pyramid import build_histograms_for_dir
 
 logging.basicConfig(level=logging.DEBUG, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
@@ -105,7 +106,7 @@ def main():
     orchestrator = RoundOrchestrator(
         source=source,
         assigner=assigner,
-        outdir=args.outdir,
+        outdir=args.outdir+"/parquet_tiles",
         max_parallel_files=args.max_parallel_files,
         compression=args.compression,
         sort_mode=args.sort_mode,
@@ -114,6 +115,18 @@ def main():
     )
     orchestrator.run()
 
+
+    logger.info("Tiling complete. Starting histogram generation.")
+
+    build_histograms_for_dir(
+        tiles_dir=args.outdir + "/parquet_tiles",
+        outdir=args.outdir + "/histograms",
+        geom_col=args.geom_col,
+        grid_size=4096,
+        dtype="float64",
+        hist_max_parallel=8,
+        hist_rg_parallel=4,
+    )
 
 if __name__ == "__main__":
     main()

@@ -1,129 +1,110 @@
-# StarMap – Scripts
+# Tile Geoparquet Pipeline
 
-Utilities to convert, slice, and benchmark OSM21 datasets (e.g., Lakes/Buildings) using GeoJSON and GeoParquet.
-
-## Contents
-
-- `convert.py` – Convert **GeoJSON ⇄ GeoParquet** (with optional per-row bbox on write) + simple timing.
-- `benchmark_geopandas.py` – Benchmark **post-filter** workflow: load GeoJSON master → bbox filter in memory → write subsets.
-- `benchmark_geoparquet.py` – Benchmark **post-filter** workflow: load GeoParquet master once → bbox filter in memory → write subsets.
-- `benchmark_geoparquet_internal_filtering.py` – Benchmark **internal bbox filtering**: `gpd.read_parquet(..., bbox=...)` (predicate pushdown) and write subsets.
-
-> Regions used (lon/lat, EPSG:4326):  
-> `ucr` (-117.35, 33.95, -117.30, 34.00) • `riverside` (-117.55, 33.85, -117.25, 34.05) •  
-> `county` (-118.00, 33.40, -116.40, 34.20) • `southern_ca` (-119.00, 32.50, -115.50, 34.50)
-
----
+This project creates tiled GeoParquet datasets and vector tiles from any input GeoParquet or GeoJSON file.
+It also includes a small development server for previewing the generated tiles.
 
 ## Requirements
 
-- Python 3.9+ recommended  
-- `geopandas`, `pyarrow`, `shapely`  
+Install dependencies:
 
-Install:
-```bash
-pip install geopandas pyarrow shapely 
-```
+pip install -r requirements.txt
 
-## Usage
+## Directory structure
 
-### 1. Convert GeoJSON ⇄ GeoParquet
+The pipeline expects the following layout:
 
-#### GeoJSON → GeoParquet (with per-row bbox)
-Writes GeoParquet 1.1 with per-row bbox (`struct{xmin,ymin,xmax,ymax}`) when `--bbox=1`. Prints per-run times and avg/min/max.
+project/
+    Makefile
+    tile_geoparquet/
+    mvt/
+    server/
+    datasets/          output GeoParquet tiles
+    mvt_out/           output MVT tiles
 
-```bash
-python convert.py gpq input.geojson output.parquet --repeat=3 --bbox=1
-```
+You can place your input dataset anywhere, as long as you pass the path to make tiles.
 
-#### GeoParquet → GeoJSON
+## Tiling a dataset
 
-```bash
-python convert.py gjs input.parquet output.geojson --repeat=2
-```
+Run the tiler:
 
----
+make tiles INPUT=path/to/your/data.parquet
 
-### 2. Benchmark (Post-filter, load once → filter in memory)
+Example:
 
-Reads the GeoParquet master once into memory, applies bbox with intersects, and writes subsets.
+make tiles INPUT=../extras/original_datasets/highways/roads.parquet
 
-```bash
-python benchmark_geoparquet.py master.parquet
-```
+The Makefile will:
 
-**Sample output:**
-```
-Benchmark results:
-ucr: rows 28 / 918376 (load=0.662s, filter=0.026s, write=0.002s, total=0.690s)
-...
-```
+1. Extract the dataset name from the input file, for example roads.parquet becomes roads.
+2. Run the tiling pipeline and generate GeoParquet tiles inside:
 
----
+datasets/roads/
 
-### 3. Benchmark (Internal bbox filter / predicate pushdown)
+3. Automatically generate histogram data used for visualization and analysis.
+4. Write logs to:
 
-Reads each region using `bbox=` so Parquet/Arrow can prune row groups (requires the file was written with per-row bbox).
+logs_roads.txt
 
-```bash
-python benchmark_geoparquet_internal_filtering.py master_with_bbox.parquet
-# or project geometry only:
-python benchmark_geoparquet_internal_filtering.py master_with_bbox.parquet geometry_only
-```
+## Generating MVT tiles
 
-**Sample output:**
-```
-Benchmark results (internal bbox filter):
-ucr: rows 30 / 918376 (load=0.0s, filter=0.206s, write=0.003s, total=0.209s)
-...
-```
+After GeoParquet tiles are created, run:
 
----
+make mvt INPUT=path/to/your/data.parquet
 
-#### Important notes
+This reads the dataset from:
 
-- **Pushdown is working** (row-group pruning confirmed).
-- But internal filtering did **not outperform post-filtering**.
+datasets/<dataset_name>
 
-**Reasons:**
-- Row groups are large → small bboxes still load most groups.
-- Data not spatially clustered → many groups overlap every bbox.
-- Overhead of Arrow filtering dominates small queries.
-- Filesystem caching makes later/larger reads appear faster.
+and writes vector tiles to:
 
-**To see clear wins:**
-- Write with smaller row groups (e.g., `row_group_size=50_000`).
-- Spatially sort rows before writing (cluster by tile/Hilbert key).
+mvt_out/<dataset_name>
 
----
+Example:
 
-### 4. Benchmark (GeoJSON → subsets)
+make mvt INPUT=../extras/original_datasets/highways/roads.parquet
 
-To show the GeoJSON load penalty:
+## Running the local tile server
 
-```bash
-python benchmark_geopandas.py master.geojson
-```
+The server reads all datasets inside the datasets directory.
+You do not need to pass INPUT:
 
-Output shows ~20s load time for large files, with tiny filter/write times per region.
+make server
 
----
+This will:
 
-## Dataset
+1. Start the Flask server with:
 
-Download OSM21 datasets (e.g., Lakes/Buildings) for California from UCR Star:  
-https://star.cs.ucr.edu/?osm21/buildings#center=37.39,-118.17&zoom=6
+python3 server/server.py --root datasets
 
-Save as `*.geojson`, then convert with `convert.py`.
+2. Open the viewer in your default browser:
 
----
+server/view_mvt.html
 
-## Tips & Troubleshooting
+Example tile URLs:
 
-- **Confirm per-row bbox exists:** schema should show  
-  `bbox: struct<xmin: double, ymin: double, xmax: double, ymax: double>`.
-- **Verify pushdown:** use PyArrow Dataset to count row groups selected with vs without bbox.
-- **For clearer benchmarks:**
-  - Use smaller row groups.
-  - Spatially sort rows.
-  - Run multiple trials
+http://localhost:5000/roads/0/0/0.mvt
+http://localhost:5000/roads/5/12/18.mvt
+
+Any dataset that exists in datasets is automatically served.
+
+## Cleaning generated data
+
+To remove all generated tiles and logs:
+
+make clean
+
+This deletes:
+
+datasets/*
+mvt_out/*
+logs_*.txt
+
+## Summary of commands
+
+make tiles INPUT=../path/to/data.parquet
+make mvt INPUT=../path/to/data.parquet
+make all INPUT=../path/to/data.parquet
+make server
+make clean
+
+This provides a workflow for converting any GeoJSON or GeoParquet input into tiled GeoParquet, generating histograms, producing vector tiles, and visualizing the data in a browser.

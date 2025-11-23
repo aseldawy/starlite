@@ -1,44 +1,4 @@
-# # tile_geoparquet/hist_cli.py
-# import argparse
-# import logging
-# from .hist_pyramid import build_histograms_for_dir
-
-# logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-# logger = logging.getLogger(__name__)
-
-
-# def main():
-#     ap = argparse.ArgumentParser(
-#         description="Build per-tile histograms and one global histogram (same resolution)."
-#     )
-
-#     ap.add_argument("--tiles-dir", required=True)
-#     ap.add_argument("--outdir", required=True)
-#     ap.add_argument("--geom-col", default="geometry")
-#     ap.add_argument("--grid-size", type=int, default=4096)
-#     ap.add_argument("--dtype", default="float64", choices=["float64", "float32"])
-#     ap.add_argument("--hist-max-parallel", type=int, default=8)
-#     ap.add_argument("--hist-rg-parallel", type=int, default=4)
-
-#     args = ap.parse_args()
-
-#     build_histograms_for_dir(
-#         tiles_dir=args.tiles_dir,
-#         outdir=args.outdir,
-#         geom_col=args.geom_col,
-#         grid_size=args.grid_size,
-#         dtype=args.dtype,
-#         hist_max_parallel=args.hist_max_parallel,
-#         hist_rg_parallel=args.hist_rg_parallel,
-#     )
-
-
-# if __name__ == "__main__":
-#     main()
-
-
 # tile_geoparquet/hist_cli.py
-
 import argparse
 import logging
 from pathlib import Path

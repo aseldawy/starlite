@@ -339,9 +339,7 @@ def generate_bucket_tiles(
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Bucket based MVT tile generator")
 
-    parser.add_argument("--parquet_dir", required=True, help="Directory of GeoParquet tiles")
-    parser.add_argument("--hist", required=True, help="Path to global histogram numpy file")
-    parser.add_argument("--out", required=True, help="Output directory for MVT tiles")
+    parser.add_argument("--dir", required=True, help="Root directory that contains parquet tiles and histogram folder")
     parser.add_argument("--zoom", type=int, default=7, help="Last zoom level to generate")
     parser.add_argument("--threshold", type=float, default=0, help="Histogram density threshold")
     parser.add_argument("--log-level", default="INFO", help="Logging level (DEBUG, INFO, WARNING, ERROR)")
@@ -352,12 +350,12 @@ if __name__ == "__main__":
     level = getattr(logging, args.log_level.upper(), logging.INFO)
     logger.setLevel(level)
     
-    logger.info(f"Starting MVT generation: parquet_dir={args.parquet_dir}, hist={args.hist}, out={args.out}, zoom={args.zoom}, threshold={args.threshold}")
+    logger.info(f"Starting MVT generation: parquet_dir={args.dir + '/parquet_tiles'}, hist={args.dir + '/histograms/global.npy'}, zoom={args.zoom}, threshold={args.threshold}")
 
     generate_bucket_tiles(
-        parquet_dir=args.parquet_dir,
-        hist_path=args.hist,
-        outdir=args.out,
+        parquet_dir=args.dir + "/parquet_tiles" ,
+        hist_path=args.dir + "/histograms/global.npy",
+        outdir=args.dir + "/mvt",
         last_zoom=args.zoom,
         threshold=args.threshold
     )
