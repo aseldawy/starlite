@@ -237,6 +237,8 @@ class RSGroveAssigner:
           - Assign a row to the smallest-area tile whose MBR fully contains the row's bbox.
           - If none contains, the row is SKIPPED.
         """
+        logger.info("[ASSIGNER] After ensure_large_types metadata: %s", tbl.schema.metadata)
+
         if tbl.num_rows == 0:
             return {}
         if self._geom_col not in tbl.column_names:
@@ -244,6 +246,8 @@ class RSGroveAssigner:
 
         t = tbl.combine_chunks()
         t = ensure_large_types(t, self._geom_col)
+        logger.info("[ASSIGNER] After ensure_large_types metadata: %s", t.schema.metadata)
+
         geoms = from_wkb(t[self._geom_col].to_numpy(zero_copy_only=False))
 
         row_ids_by_pid: Dict[int, List[int]] = {}

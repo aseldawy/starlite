@@ -26,4 +26,9 @@ def ensure_large_types(tbl: pa.Table, geom_col: str) -> pa.Table:
 
     if not changed:
         return tbl
-    return tbl.cast(pa.schema(new_fields), safe=False)
+    # copy the old metadata
+    old_meta = tbl.schema.metadata
+
+    # new schema with same metadata
+    new_schema = pa.schema(new_fields, metadata=old_meta)
+    return tbl.cast(new_schema, safe=False)
