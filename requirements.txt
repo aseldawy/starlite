@@ -1,6 +1,13 @@
+blinker==1.9.0
 certifi==2025.11.12
+click==8.3.1
+Flask==3.1.2
+flask-cors==6.0.1
 geopandas==1.1.1
+itsdangerous==2.2.0
+Jinja2==3.1.6
 mapbox-vector-tile==2.2.0
+MarkupSafe==3.0.3
 numpy==2.3.5
 packaging==25.0
 pandas==2.3.3
@@ -13,5 +20,6 @@ python-dateutil==2.9.0.post0
 pytz==2025.2
 shapely==2.1.2
 six==1.17.0
--e git+ssh://git@github.com/rohanbennur43/ucr-bigdatalab-starmap.git@79cbee2b8f397e4e06023295aa1ad0a66ba1e6e6#egg=tile_geoparquet&subdirectory=tile-geoparquet
+-e git+ssh://git@github.com/rohanbennur43/ucr-bigdatalab-starmap.git@dd925c1c00d098a129e4fd4b0f45e62b7c299323#egg=tile_geoparquet&subdirectory=tile-geoparquet
 tzdata==2025.2
+Werkzeug==3.1.3
