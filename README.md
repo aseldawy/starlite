@@ -1,69 +1,34 @@
-# Tile Geoparquet Pipeline
+# Geospatial Data Visualiser
+This repository provides a simple Makefile driven workflow to generate spatial tiles and Mapbox Vector Tiles from Parquet datasets. All steps run through a few make targets and produce logs automatically.
+## Make Targets
 
-This project converts any GeoJSON or GeoParquet file into tiled GeoParquet, then automatically generates MVT vector tiles and histogram grids. It also includes a small development server and web viewer.
+### `make tiles`
+Runs the tiling pipeline.
 
-## Requirements
-Install dependencies:
-pip install -r requirements.txt
+- Splits the input dataset into 40 tiles.
+- Uses Z order sorting and sampling.
+- Saves outputs in `datasets/<dataset_name>/`.
+- Writes logs to `logs_<dataset_name>.txt`.
 
-## Directory Structure
-project/
-  Makefile
-  tile_geoparquet/
-  mvt/
-  server/
-  datasets/          # GeoParquet tiles (auto created)
-  mvt_out/           # MVT tiles (auto created)
-  requirements.txt
+### `make mvt`
+Generates Mapbox Vector Tiles.
 
-## Full Pipeline
-You must run BOTH steps:  
-1) GeoParquet tiling  
-2) MVT tile generation  
+- Reads tiles from `datasets/<dataset_name>/`.
+- Writes MVTs to `mvt_out/<dataset_name>/`.
+- Logs are written to the same dataset log file.
 
-### Step 1. Tiling a Dataset
-Run:
-make tiles INPUT=path/to/your/data.parquet
+### `make all`
+Runs `tiles` followed by `mvt` in one command.
 
-Example:
-make tiles INPUT=../extras/original_datasets/highways/roads.parquet
+### `make server`
+Starts a small local server to view tiles.
 
-This will:
-1. Extract dataset name (roads.parquet → roads)
-2. Generate GeoParquet tiles in datasets/roads/
-3. Generate histogram grids for rendering and analysis
-4. Store logs in logs_roads.txt
+- Serves the `datasets/` directory.
+- Opens `server/view_mvt.html` automatically.
 
-### Step 2. Generate MVT Tiles (required)
-After step 1, run:
-make mvt INPUT=path/to/your/data.parquet
+### `make clean`
+Removes all generated tiles, MVTs, and logs.
 
-This reads tiles from:
-datasets/<dataset_name>/
-And writes vector tiles to:
-mvt_out/<dataset_name>/
+## Example
+make all INPUT=../extras/original_datasets/OSM2015_33.parquet
 
-These MVT tiles are required for viewing data in the frontend.
-
-## Development Server
-To preview tiles:
-make server
-
-This:
-- Starts the Flask server
-- Opens server/view_mvt.html automatically (if supported)
-
-## Cleaning Outputs
-make clean
-
-Removes:
-- datasets/*
-- mvt_out/*
-- logs_*.txt
-
-## Summary
-✔ Required: Generate GeoParquet tiles  
-✔ Required: Generate MVT tiles  
-✔ Automatic histogram grids  
-✔ Local tile server with viewer  
-✔ Simple Makefile workflow
