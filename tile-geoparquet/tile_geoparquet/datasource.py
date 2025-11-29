@@ -147,6 +147,10 @@ class GeoJSONSource(DataSource):
                 self._schema = _attach_geoparquet_metadata(
                     first.schema, self._crs_hint or self.target_crs or self.src_crs
                 )
+                self._schema = _attach_geoparquet_metadata(
+                    base, self._crs_hint or self.target_crs or self.src_crs
+                )
+
         return self._schema
 
     # ---------------- iterator ---------------- #
@@ -166,13 +170,18 @@ class GeoJSONSource(DataSource):
                     chunk = chunk.filter(pc.invert(mask_null))
 
             if self._schema is None:
-                # Lock schema (and metadata) from first non-empty chunk
+                # Lock schema with GeoParquet metadata
                 self._schema = _attach_geoparquet_metadata(
                     chunk.schema, self._crs_hint or self.target_crs or self.src_crs
                 )
-                yield chunk.combine_chunks()
+                tbl = chunk.combine_chunks()
+                tbl = tbl.replace_schema_metadata(self._schema.metadata)
+                yield tbl
             else:
-                yield self._coerce_to_schema(chunk, self._schema).combine_chunks()
+                tbl = self._coerce_to_schema(chunk, self._schema).combine_chunks()
+                tbl = tbl.replace_schema_metadata(self._schema.metadata)
+                yield tbl
+
 
             skip += chunk.num_rows
             if chunk.num_rows == 0:

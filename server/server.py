@@ -27,4 +27,4 @@ def serve_tile(dataset, z, x, y):
     return Response(tiler.get_tile(z, x, y), mimetype="application/vnd.mapbox-vector-tile")
 
 if __name__ == "__main__":
-    app.run(debug=True)
+    app.run(debug=False)

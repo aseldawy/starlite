@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def build_source(input_path: str, geom_col: str):
     if is_geojson_path(input_path):
         logger.info("Using GeoJSONSource for %s", input_path)
-        return GeoJSONSource(input_path, geom_col=geom_col)
+        return GeoJSONSource(input_path)
     else:
         logger.info("Using GeoParquetSource for %s", input_path)
         return GeoParquetSource(input_path)
