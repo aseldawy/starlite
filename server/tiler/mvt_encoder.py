@@ -1,7 +1,7 @@
 from shapely import make_valid, ops
 from shapely.geometry import mapping
 import mapbox_vector_tile
-
+import logging
 class MVTEncoder:
     def __init__(self, bbox_3857, tile_poly_3857, extent=4096):
         self.bbox_3857 = bbox_3857
@@ -19,6 +19,7 @@ class MVTEncoder:
         return ops.transform(scale_func, geom)
 
     def encode(self, features):
+        
         layer = {
             "name": "layer0",
             "features": features,

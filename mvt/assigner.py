@@ -5,7 +5,7 @@ import random
 
 logger = logging.getLogger(__name__)
 
-MAX_GEOMS_PER_TILE = 5000   # choose your number
+MAX_GEOMS_PER_TILE = 25000   # choose your number
 
 
 class TileAssigner:

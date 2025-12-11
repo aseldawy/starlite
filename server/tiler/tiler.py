@@ -45,7 +45,6 @@ class VectorTiler:
             level=logging.INFO,
             format="%(asctime)s [%(levelname)s] %(message)s"
         )
-        logging.info(f"In memory tile cache initialized with size {memory_cache_size}")
 
     def tile_path(self, z, x, y):
         return self.mvt_dir / str(z) / str(x) / f"{y}.mvt"
@@ -61,6 +60,7 @@ class VectorTiler:
             return encoder.empty_tile()
 
         if not intersecting:
+            logging.info(f"No intersecting files found for {bounds}")
             return encoder.empty_tile()
 
         features = []
@@ -81,39 +81,45 @@ class VectorTiler:
             if clipped.empty:
                 continue
 
-            for geom in clipped.geometry:
-                if geom is None or geom.is_empty:
+        for idx, row in clipped.iterrows():
+            geom = row.geometry
+            if geom is None or geom.is_empty:
+                continue
+
+            # extract attributes (all non geometry columns)
+            attrs = {k: v for k, v in row.items() if k != "geometry" and v is not None}
+
+            parts = explode_collections(geom)
+            if not parts:
+                continue
+
+            for part in parts:
+                if part.is_empty:
                     continue
 
-                parts = explode_collections(geom)
-                if not parts:
+                try:
+                    scaled = encoder.transform_geom(
+                        part,
+                        lambda xx, yy, zz=None:
+                            TileBounds.scale_to_tile_coords(xx, yy, bounds.bbox_3857)
+                    )
+                except Exception as e:
+                    logging.error(f"Transform failed: {e}")
                     continue
 
-                for part in parts:
-                    if part.is_empty:
-                        continue
+                if scaled.is_empty:
+                    continue
 
-                    try:
-                        scaled = encoder.transform_geom(
-                            part,
-                            lambda xx, yy, zz=None: TileBounds.scale_to_tile_coords(xx, yy, bounds.bbox_3857)
-                        )
-                    except Exception as e:
-                        logging.error(f"Transform failed: {e}")
-                        continue
-
-                    if scaled.is_empty:
-                        continue
-
-                    features.append({
-                        "geometry": mapping(scaled),
-                        "properties": {}
-                    })
+                features.append({
+                    "geometry": mapping(scaled),
+                    "properties": attrs
+                })
 
         if not features:
             return encoder.empty_tile()
 
         try:
+            logging.info(f"Encoding {len(features)} features for tile {bounds}")
             return encoder.encode(features)
         except Exception as e:
             logging.error(f"MVT encode failed: {e}")
