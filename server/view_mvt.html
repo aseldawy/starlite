@@ -2,35 +2,25 @@
 <html>
 <head>
 <meta charset="utf-8" />
-<title>Local MVT Viewer Points, Lines, Polygons</title>
+<title>ROADS Viewer</title>
 <meta name="viewport" content="width=device-width, initial-scale=1" />
+
 <link href="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.css" rel="stylesheet" />
 <script src="https://unpkg.com/maplibre-gl@3.6.0/dist/maplibre-gl.js"></script>
+
 <style>
   body { margin: 0; padding: 0; }
   #map { width: 100vw; height: 100vh; }
 </style>
 </head>
-<body>
 
+<body>
 <div id="map"></div>
 
 <script>
-// Log all network requests made by fetch
-const origFetch = window.fetch;
-window.fetch = async function(...args) {
-  console.log("[Fetch] Request", args[0]);
-  try {
-    const resp = await origFetch(...args);
-    console.log("[Fetch] Response", args[0], resp.status, resp.headers.get("Content-Type"));
-    return resp;
-  } catch (err) {
-    console.error("[Fetch] ERROR", args[0], err);
-    throw err;
-  }
-};
-
-// Create the map
+// ---------------------------
+// Map initialization
+// ---------------------------
 const map = new maplibregl.Map({
   container: "map",
   style: {
@@ -43,12 +33,7 @@ const map = new maplibregl.Map({
       },
       local: {
         type: "vector",
-        tiles: ["http://127.0.0.1:5000/OSM2015_33/{z}/{x}/{y}.mvt"],
-        // tiles: ["http://127.0.0.1:5000/out_ca/{z}/{x}/{y}.mvt"],
-        // tiles: ["http://127.0.0.1:5000/TIGER2018_COUNTY/{z}/{x}/{y}.mvt"],
-        // tiles: ["http://127.0.0.1:5000/TIGER2018_PLACE/{z}/{x}/{y}.mvt"],
-        // tiles: ["http://127.0.0.1:5000/roads/{z}/{x}/{y}.mvt"],
-
+        tiles: ["http://127.0.0.1:5000/TIGER2018_PRISECROADS/{z}/{x}/{y}.mvt"],
         minzoom: 0,
         maxzoom: 14
       }
@@ -59,87 +44,124 @@ const map = new maplibregl.Map({
         type: "raster",
         source: "basemap"
       },
-      // {
-      //   id: "layer0-fill",
-      //   type: "fill",
-      //   source: "local",
-      //   "source-layer": "layer0",
-      //   paint: {
-      //     "fill-color": "#0080ff",
-      //     "fill-opacity": 0.25
-      //   }
-      // },
+
+      // ---------------------------
+      // PRIMARY ROADS (RTTYP = M)
+      // ---------------------------
       {
-        id: "layer0-outline",
+        id: "roads-primary",
         type: "line",
         source: "local",
         "source-layer": "layer0",
+        filter: ["==", ["get", "RTTYP"], "M"],
         paint: {
-          "line-color": "#003366",
-          "line-width": 1.5,
+          "line-color": "#ff0000",
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4, 1.5,
+            8, 3.0,
+            12, 5.0
+          ],
+          "line-opacity": 0.95
+        }
+      },
+
+      // ---------------------------
+      // SECONDARY ROADS (RTTYP = S)
+      // ---------------------------
+      {
+        id: "roads-secondary",
+        type: "line",
+        source: "local",
+        "source-layer": "layer0",
+        filter: ["==", ["get", "RTTYP"], "S"],
+        paint: {
+          "line-color": "#ffa500",
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4, 1.2,
+            8, 2.0,
+            12, 3.0
+          ],
           "line-opacity": 0.9
         }
       },
+
+      // ---------------------------
+      // LOCAL ROADS (RTTYP = C)
+      // ---------------------------
       {
-        id: "layer0-lines",
+        id: "roads-local",
         type: "line",
         source: "local",
         "source-layer": "layer0",
+        filter: ["==", ["get", "RTTYP"], "C"],
         paint: {
-          "line-color": "#ff6600",
-          "line-width": 2.0,
-          "line-opacity": 0.9
-        },
-        filter: ["==", "$type", "LineString"]
+          "line-color": "#cccccc",
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4, 0.8,
+            8, 1.2,
+            12, 2.0
+          ],
+          "line-opacity": 0.85
+        }
       },
+
+      // ---------------------------
+      // RAMPS / CONNECTORS (RTTYP = P)
+      // ---------------------------
       {
-        id: "layer0-points",
-        type: "circle",
+        id: "roads-ramps",
+        type: "line",
         source: "local",
         "source-layer": "layer0",
+        filter: ["==", ["get", "RTTYP"], "P"],
         paint: {
-          "circle-radius": 4,
-          "circle-color": "#ff0000",
-          "circle-stroke-width": 1,
-          "circle-stroke-color": "#ffffff",
-          "circle-opacity": 0.9
-        },
-        filter: ["==", "$type", "Point"]
+          "line-color": "#ffff00",
+          "line-width": [
+            "interpolate",
+            ["linear"],
+            ["zoom"],
+            4, 0.8,
+            8, 1.2,
+            12, 2.0
+          ],
+          "line-opacity": 0.85
+        }
+      },
+
+      // ---------------------------
+      // TRAILS (RTTYP = T)
+      // ---------------------------
+      {
+        id: "roads-trails",
+        type: "line",
+        source: "local",
+        "source-layer": "layer0",
+        filter: ["==", ["get", "RTTYP"], "T"],
+        paint: {
+          "line-color": "#8b4513",
+          "line-width": 1.0,
+          "line-dasharray": [2, 2],
+          "line-opacity": 0.8
+        }
       }
     ]
   },
-  center: [-120, 37],
-  zoom: 5
+
+  center: [-98, 38],
+  zoom: 4
 });
 
 map.addControl(new maplibregl.NavigationControl());
-
-// Log all map data events
-map.on("data", e => {
-  if (e.sourceId === "local") {
-    console.log("[Maplibre data]", e);
-  }
-});
-
-// Log detailed tile events
-map.on("sourcedata", e => {
-  if (e.sourceId === "local") {
-    console.log("[Tile event] state", e.tile && e.tile.state, "coord", e.tile && e.tile.coord, e);
-  }
-});
-
-// Log map errors
-map.on("error", e => {
-  console.error("[Maplibre error]", e);
-});
-
-// Log loading events
-map.on("dataloading", e => {
-  if (e.sourceId === "local") {
-    console.log("[Loading tile]", e);
-  }
-});
-
 </script>
+
 </body>
 </html>
