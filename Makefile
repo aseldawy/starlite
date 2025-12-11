@@ -14,7 +14,7 @@ PYTHON = python3
 # ----------------------------
 
 INPUT ?= none
-THRESHOLD ?= 0.5
+THRESHOLD ?= 100000
 
 ifneq ($(MAKECMDGOALS),server)
 ifneq ($(MAKECMDGOALS),clean)
@@ -50,10 +50,17 @@ tiles:
 # 		--threshold $(THRESHOLD)
 
 mvt:
-	$(PYTHON) mvt/mvt.py \
+	$(PYTHON) -m mvt.main \
 		--dir $(TILES) \
-		--threshold $(THRESHOLD) > $(LOGFILE) 2>&1 \
+		--zoom $(ZOOM) \
+		--threshold $(THRESHOLD) \
+		> $(LOGFILE) 2>&1 \
 		|| (echo "MVT generation failed. Check $(LOGFILE) for details."; exit 1)
+
+# 	$(PYTHON) mvt/mvt.py \
+# 		--dir $(TILES) \
+# 		--threshold $(THRESHOLD) > $(LOGFILE) 2>&1 \
+# 		|| (echo "MVT generation failed. Check $(LOGFILE) for details."; exit 1)
 
 # ----------------------------
 # Server target (no INPUT)
