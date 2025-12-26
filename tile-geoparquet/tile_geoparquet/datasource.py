@@ -5,6 +5,7 @@ import json
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.compute as pc
+import numpy as np
 
 logger = logging.getLogger(__name__)
 
