@@ -137,7 +137,7 @@ class GeoJSONSource(DataSource):
     # ---------------- schema ---------------- #
     def schema(self) -> pa.Schema:
         if self._schema is None:
-            first = self._read_batch_with_fiona(0, max(1, self.batch_rows))
+            first = self._read_first_batch()
             if first is None or first.num_rows == 0:
                 base = pa.schema([("geometry", pa.binary())])
                 self._schema = _attach_geoparquet_metadata(
@@ -147,65 +147,19 @@ class GeoJSONSource(DataSource):
                 self._schema = _attach_geoparquet_metadata(
                     first.schema, self._crs_hint or self.target_crs or self.src_crs
                 )
-                self._schema = _attach_geoparquet_metadata(
-                    base, self._crs_hint or self.target_crs or self.src_crs
-                )
 
         return self._schema
 
     # ---------------- iterator ---------------- #
     def iter_tables(self) -> Iterable[pa.Table]:
-        skip = 0
-        while True:
-            chunk = self._read_batch_with_fiona(skip, self.batch_rows)
-            if chunk is None or chunk.num_rows == 0:
-                break
-
-            if "geometry" not in chunk.column_names:
-                raise ValueError("Missing 'geometry' column from Fiona reader")
-
-            if not self.keep_null_geoms:
-                mask_null = pc.is_null(chunk["geometry"])
-                if pc.any(mask_null).as_py():
-                    chunk = chunk.filter(pc.invert(mask_null))
-
-            if self._schema is None:
-                # Lock schema with GeoParquet metadata
-                self._schema = _attach_geoparquet_metadata(
-                    chunk.schema, self._crs_hint or self.target_crs or self.src_crs
-                )
-                tbl = chunk.combine_chunks()
-                tbl = tbl.replace_schema_metadata(self._schema.metadata)
-                yield tbl
-            else:
-                tbl = self._coerce_to_schema(chunk, self._schema).combine_chunks()
-                tbl = tbl.replace_schema_metadata(self._schema.metadata)
-                yield tbl
-
-
-            skip += chunk.num_rows
-            if chunk.num_rows == 0:
-                break  # safety
-
-    # ---------------- internal helpers ---------------- #
-    def _read_batch_with_fiona(self, skip: int, n: int) -> Optional[pa.Table]:
-        """
-        Open the GeoJSON with Fiona, skip `skip` features, read up to `n` features,
-        convert properties to Arrow columns and geometry to WKB, return pa.Table.
-
-        NOTE: This is O(total_features) per call due to skipping, but is robust and simple.
-        """
         import fiona
         from shapely.geometry import shape as shapely_shape
         import numpy as np
 
         rows_props: List[Dict[str, Any]] = []
         wkb_list: List[Any] = []
+        batch_index = 0
 
-        read = 0
-        seen = 0
-
-        # Open and detect CRS hint (once)
         with fiona.open(self.path, "r") as src:
             if self._crs_hint is None:
                 try:
@@ -214,11 +168,6 @@ class GeoJSONSource(DataSource):
                     self._crs_hint = None
 
             for feat in src:
-                if seen < skip:
-                    seen += 1
-                    continue
-
-                # Collect
                 props = feat.get("properties") or {}
                 geom = feat.get("geometry", None)
 
@@ -234,18 +183,76 @@ class GeoJSONSource(DataSource):
                 rows_props.append(props)
                 wkb_list.append(wkb)
 
-                read += 1
-                seen += 1
-                if read >= n:
+                if len(rows_props) >= self.batch_rows:
+                    chunk = self._build_table_from_rows(rows_props, wkb_list)
+                    rows_props.clear()
+                    wkb_list.clear()
+                    tbl = self._finalize_chunk(chunk)
+                    if tbl is not None:
+                        logger.info(
+                            "Fiona batch %d (%d rows) -> %d columns (including 'geometry')",
+                            batch_index,
+                            tbl.num_rows,
+                            len(tbl.column_names),
+                        )
+                        batch_index += 1
+                        yield tbl
+
+            if rows_props:
+                chunk = self._build_table_from_rows(rows_props, wkb_list)
+                tbl = self._finalize_chunk(chunk)
+                if tbl is not None:
+                    logger.info(
+                        "Fiona batch %d (%d rows) -> %d columns (including 'geometry')",
+                        batch_index,
+                        tbl.num_rows,
+                        len(tbl.column_names),
+                    )
+                    yield tbl
+
+    # ---------------- internal helpers ---------------- #
+    def _read_first_batch(self) -> Optional[pa.Table]:
+        """Read the first batch of features to establish the schema."""
+        import fiona
+        from shapely.geometry import shape as shapely_shape
+        import numpy as np
+
+        rows_props: List[Dict[str, Any]] = []
+        wkb_list: List[Any] = []
+
+        with fiona.open(self.path, "r") as src:
+            if self._crs_hint is None:
+                try:
+                    self._crs_hint = _infer_crs_from_fiona_meta(src.meta or {})
+                except Exception:
+                    self._crs_hint = None
+
+            for feat in src:
+                props = feat.get("properties") or {}
+                geom = feat.get("geometry", None)
+
+                if geom is None:
+                    wkb = None
+                else:
+                    try:
+                        g = shapely_shape(geom)
+                        wkb = g.wkb if g is not None else None
+                    except Exception:
+                        wkb = None
+
+                rows_props.append(props)
+                wkb_list.append(wkb)
+
+                if len(rows_props) >= max(1, self.batch_rows):
                     break
 
-        if read == 0:
-            logger.info(f"Fiona read returned 0 rows for slice {skip}:{skip+n}")
+        if not rows_props:
+            logger.info("Fiona read returned 0 rows when inferring schema")
             return None
 
-        # Build Arrow table:
-        # 1) property columns -> Arrow via pandas-free approach (Arrow can infer types from Python lists)
-        #    but properties across features may have heterogeneous keys; unify all keys seen.
+        return self._build_table_from_rows(rows_props, wkb_list)
+
+    def _build_table_from_rows(self, rows_props: List[Dict[str, Any]], wkb_list: List[Any]) -> pa.Table:
         # Gather union of keys
         all_keys: List[str] = []
         seen_keys = set()
@@ -260,18 +267,41 @@ class GeoJSONSource(DataSource):
         names: List[str] = []
 
         for k in all_keys:
-            col_py = [ row.get(k, None) for row in rows_props ]
+            col_py = [row.get(k, None) for row in rows_props]
             cols.append(pa.array(col_py))
             names.append(k)
 
-        # 2) geometry column (binary)
+        # Geometry column (binary)
         wkb_arr = pa.array(np.array(wkb_list, dtype=object), type=pa.binary())
         cols.append(wkb_arr)
         names.append("geometry")
 
-        t = pa.table(cols, names=names)
-        logger.info(f"Fiona batch {skip}:{skip+n} -> {t.num_rows} rows, {len(names)} columns (including 'geometry')")
-        return t
+        return pa.table(cols, names=names)
+
+    def _finalize_chunk(self, chunk: pa.Table) -> Optional[pa.Table]:
+        if chunk is None or chunk.num_rows == 0:
+            return None
+
+        if "geometry" not in chunk.column_names:
+            raise ValueError("Missing 'geometry' column from Fiona reader")
+
+        tbl = chunk
+        if not self.keep_null_geoms:
+            mask_null = pc.is_null(tbl["geometry"])
+            if pc.any(mask_null).as_py():
+                tbl = tbl.filter(pc.invert(mask_null))
+
+        if tbl.num_rows == 0:
+            return None
+
+        if self._schema is None:
+            # Lock schema with GeoParquet metadata
+            self._schema = _attach_geoparquet_metadata(
+                tbl.schema, self._crs_hint or self.target_crs or self.src_crs
+            )
+
+        tbl = self._coerce_to_schema(tbl, self._schema).combine_chunks()
+        return tbl.replace_schema_metadata(self._schema.metadata)
 
     def _coerce_to_schema(self, t: pa.Table, schema: pa.Schema) -> pa.Table:
         out_cols = []
