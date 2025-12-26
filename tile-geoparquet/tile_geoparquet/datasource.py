@@ -1,6 +1,7 @@
-from typing import Iterable, Optional, List, Dict, Any
+from typing import Iterable, Optional, List, Dict, Any, Tuple
 import logging
 import json
+from pathlib import Path
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -39,7 +40,7 @@ class GeoParquetSource(DataSource):
 # ------------------------- Helpers ------------------------- #
 def is_geojson_path(path: str) -> bool:
     p = path.lower()
-    return p.endswith(".geojson") or p.endswith(".json")
+    return p.endswith((".geojson", ".geojsonl", ".json", ".jsonl"))
 
 
 def _attach_geoparquet_metadata(schema: pa.Schema, crs_hint: Optional[str]) -> pa.Schema:
@@ -72,34 +73,13 @@ def _attach_geoparquet_metadata(schema: pa.Schema, crs_hint: Optional[str]) -> p
     return pa.schema(schema, metadata=md)
 
 
-def _infer_crs_from_fiona_meta(meta: Dict[str, Any]) -> Optional[str]:
-    """
-    Try to extract a reasonable CRS hint from Fiona collection meta.
-    Prefer EPSG code if present; else return None (we avoid stuffing raw WKT).
-    """
-    try:
-        crs = meta.get("crs")
-        if isinstance(crs, dict):
-            # Fiona may return {'init': 'epsg:4326'} or {'EPSG': 4326} depending on GDAL
-            init = crs.get("init") or crs.get("INIT")
-            if isinstance(init, str) and init.lower().startswith("epsg:"):
-                return init.upper().replace("EPSG:", "EPSG:")
-            epsg = crs.get("epsg") or crs.get("EPSG")
-            if isinstance(epsg, int):
-                return f"EPSG:{epsg}"
-        # Fallback: crs_wkt is too verbose to embed as the simple string hint
-    except Exception:
-        pass
-    return None
-
-
-# ------------------------- GeoJSON source (Fiona → Arrow) ------------------------- #
+# ------------------------- GeoJSON source (streaming → Arrow) ------------------------- #
 class GeoJSONSource(DataSource):
     """
-    Streams GeoJSON as Arrow Tables using Fiona, converting geometry to WKB.
+    Streams GeoJSON / GeoJSONL as Arrow Tables, converting geometry to WKB.
 
-    - Reads features with Fiona (GDAL).
-    - Collects features in batches of `batch_rows`.
+    - For standard FeatureCollection GeoJSON, streams features with `ijson`.
+    - For GeoJSON Lines (one Feature per line), reads and batches by line.
     - Geometry dicts → shapely.shape → WKB bytes (binary Arrow column 'geometry').
     - Attaches minimal GeoParquet metadata (version, primary_column, encoding, crs hint).
     """
@@ -112,26 +92,28 @@ class GeoJSONSource(DataSource):
         target_crs: Optional[str] = None,
         keep_null_geoms: bool = False,
     ):
-        try:
-            import fiona  # noqa: F401
-        except ImportError as e:
-            raise ImportError("GeoJSONSource(Fiona) requires 'fiona'. Install via: pip install fiona") from e
-
-        if target_crs:
-            logger.warning("target_crs requested (%s) but Fiona batch reader does not reproject on the fly; "
-                           "data will be read as-is.", target_crs)
-
         self.path = path
         self.batch_rows = int(batch_rows)
         self.src_crs = src_crs
         self.target_crs = target_crs  # informational only here
         self.keep_null_geoms = keep_null_geoms
 
+        if target_crs:
+            logger.warning(
+                "target_crs requested (%s) but GeoJSON reader does not reproject on the fly; data will be read as-is.",
+                target_crs,
+            )
+
         self._schema: Optional[pa.Schema] = None
-        self._crs_hint: Optional[str] = None  # filled from Fiona metadata on first open
+        self._crs_hint: Optional[str] = None  # hint if detected
+        self._use_geojsonl: bool = False  # detection result for reader type
+
+        self._use_geojsonl, header_crs = _detect_geojson_mode_and_crs(self.path)
+        if header_crs:
+            self._crs_hint = header_crs
 
         logger.info(
-            "GeoJSONSource(Fiona) opened %s (batch_rows=%d, src_crs=%s)",
+            "GeoJSONSource opened %s (batch_rows=%d, src_crs=%s)",
             path, self.batch_rows, self.src_crs
         )
 
@@ -153,103 +135,54 @@ class GeoJSONSource(DataSource):
 
     # ---------------- iterator ---------------- #
     def iter_tables(self) -> Iterable[pa.Table]:
-        import fiona
-        from shapely.geometry import shape as shapely_shape
-        import numpy as np
-
-        rows_props: List[Dict[str, Any]] = []
-        wkb_list: List[Any] = []
         batch_index = 0
 
-        with fiona.open(self.path, "r") as src:
-            if self._crs_hint is None:
-                try:
-                    self._crs_hint = _infer_crs_from_fiona_meta(src.meta or {})
-                except Exception:
-                    self._crs_hint = None
-
-            for feat in src:
-                props = feat.get("properties") or {}
-                geom = feat.get("geometry", None)
-
-                if geom is None:
-                    wkb = None
-                else:
-                    try:
-                        g = shapely_shape(geom)
-                        wkb = g.wkb if g is not None else None
-                    except Exception:
-                        wkb = None
-
-                rows_props.append(props)
-                wkb_list.append(wkb)
-
-                if len(rows_props) >= self.batch_rows:
-                    chunk = self._build_table_from_rows(rows_props, wkb_list)
-                    rows_props.clear()
-                    wkb_list.clear()
-                    tbl = self._finalize_chunk(chunk)
-                    if tbl is not None:
-                        logger.info(
-                            "Fiona batch %d (%d rows) -> %d columns (including 'geometry')",
-                            batch_index,
-                            tbl.num_rows,
-                            len(tbl.column_names),
-                        )
-                        batch_index += 1
-                        yield tbl
-
-            if rows_props:
-                chunk = self._build_table_from_rows(rows_props, wkb_list)
-                tbl = self._finalize_chunk(chunk)
-                if tbl is not None:
-                    logger.info(
-                        "Fiona batch %d (%d rows) -> %d columns (including 'geometry')",
-                        batch_index,
-                        tbl.num_rows,
-                        len(tbl.column_names),
-                    )
-                    yield tbl
+        for features in _iter_geojson_feature_batches(self.path, self.batch_rows, self._use_geojsonl):
+            chunk = self._build_table_from_features(features)
+            tbl = self._finalize_chunk(chunk)
+            if tbl is not None:
+                logger.info(
+                    "GeoJSON batch %d (%d rows) -> %d columns (including 'geometry')",
+                    batch_index,
+                    tbl.num_rows,
+                    len(tbl.column_names),
+                )
+                batch_index += 1
+                yield tbl
 
     # ---------------- internal helpers ---------------- #
     def _read_first_batch(self) -> Optional[pa.Table]:
         """Read the first batch of features to establish the schema."""
-        import fiona
+        feature_iter = _iter_geojson_feature_batches(self.path, max(1, self.batch_rows), self._use_geojsonl)
+        try:
+            first_batch = next(feature_iter)
+        except StopIteration:
+            logger.info("GeoJSON read returned 0 rows when inferring schema")
+            return None
+
+        return self._build_table_from_features(first_batch)
+
+    def _build_table_from_features(self, features: List[Dict[str, Any]]) -> pa.Table:
         from shapely.geometry import shape as shapely_shape
-        import numpy as np
 
         rows_props: List[Dict[str, Any]] = []
         wkb_list: List[Any] = []
 
-        with fiona.open(self.path, "r") as src:
-            if self._crs_hint is None:
+        for feat in features:
+            props = feat.get("properties") or {}
+            geom = feat.get("geometry", None)
+
+            if geom is None:
+                wkb = None
+            else:
                 try:
-                    self._crs_hint = _infer_crs_from_fiona_meta(src.meta or {})
+                    g = shapely_shape(geom)
+                    wkb = g.wkb if g is not None else None
                 except Exception:
-                    self._crs_hint = None
-
-            for feat in src:
-                props = feat.get("properties") or {}
-                geom = feat.get("geometry", None)
-
-                if geom is None:
                     wkb = None
-                else:
-                    try:
-                        g = shapely_shape(geom)
-                        wkb = g.wkb if g is not None else None
-                    except Exception:
-                        wkb = None
 
-                rows_props.append(props)
-                wkb_list.append(wkb)
-
-                if len(rows_props) >= max(1, self.batch_rows):
-                    break
-
-        if not rows_props:
-            logger.info("Fiona read returned 0 rows when inferring schema")
-            return None
+            rows_props.append(props)
+            wkb_list.append(wkb)
 
         return self._build_table_from_rows(rows_props, wkb_list)
 
@@ -284,7 +217,7 @@ class GeoJSONSource(DataSource):
             return None
 
         if "geometry" not in chunk.column_names:
-            raise ValueError("Missing 'geometry' column from Fiona reader")
+            raise ValueError("Missing 'geometry' column from GeoJSON reader")
 
         tbl = chunk
         if not self.keep_null_geoms:
@@ -322,3 +255,127 @@ class GeoJSONSource(DataSource):
             else:
                 out_cols.append(pa.nulls(t.num_rows, type=fld.type))
         return pa.table(out_cols, names=[f.name for f in schema])
+
+
+def _iter_geojson_feature_batches_with_ijson(path: str, batch_size: int) -> Iterable[List[Dict[str, Any]]]:
+    """
+    Stream a GeoJSON FeatureCollection in batches using ijson to avoid loading
+    the entire file in memory.
+    """
+    try:
+        import ijson
+    except ImportError as e:
+        raise ImportError("GeoJSON streaming requires 'ijson'. Install via: pip install ijson") from e
+
+    batch: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as fin:
+        for feature in ijson.items(fin, "features.item"):
+            batch.append(feature)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+
+    if batch:
+        yield batch
+
+
+def _iter_geojsonl_feature_batches(path: str, batch_size: int) -> Iterable[List[Dict[str, Any]]]:
+    """
+    Stream a GeoJSON Lines file (one Feature per line) in batches.
+    """
+    batch: List[Dict[str, Any]] = []
+    with open(path, "r", encoding="utf-8") as fin:
+        for line in fin:
+            line = line.strip()
+            if not line:
+                continue
+            feature = json.loads(line)
+            batch.append(feature)
+            if len(batch) >= batch_size:
+                yield batch
+                batch = []
+    if batch:
+        yield batch
+
+
+def _iter_geojson_feature_batches(path: str, batch_size: int, use_geojsonl: bool) -> Iterable[List[Dict[str, Any]]]:
+    """
+    Dispatch to FeatureCollection or GeoJSON Lines batch readers based on detection result.
+    """
+    if use_geojsonl:
+        logger.info("Detected GeoJSON Lines file for %s", path)
+        yield from _iter_geojsonl_feature_batches(path, batch_size)
+    else:
+        logger.info("Detected FeatureCollection GeoJSON file for %s", path)
+        yield from _iter_geojson_feature_batches_with_ijson(path, batch_size)
+
+
+def _detect_geojson_mode_and_crs(path: str, sniff_bytes: int = 64 * 1024) -> Tuple[bool, Optional[str]]:
+    """
+    Inspect the beginning of a GeoJSON file to decide whether it is GeoJSONL and
+    to extract a CRS hint from the header of a FeatureCollection (if present).
+    """
+    path = str(Path(path))
+    try:
+        with open(path, "r", encoding="utf-8") as fin:
+            buffer = fin.read(sniff_bytes)
+    except OSError:
+        return False, None
+
+    first_nonempty: Optional[str] = None
+    for line in buffer.splitlines():
+        stripped = line.strip()
+        if stripped:
+            first_nonempty = stripped
+            break
+
+    use_geojsonl = False
+    if first_nonempty:
+        try:
+            obj = json.loads(first_nonempty)
+            if isinstance(obj, dict) and obj.get("type") == "Feature":
+                use_geojsonl = True
+        except json.JSONDecodeError:
+            pass
+
+    crs_hint: Optional[str] = None
+    if not use_geojsonl:
+        crs_hint = _extract_feature_collection_crs_hint(buffer)
+
+    return use_geojsonl, crs_hint
+
+
+def _extract_feature_collection_crs_hint(buffer: str) -> Optional[str]:
+    """
+    Try to read the CRS from the header of a FeatureCollection without loading the whole file.
+    Looks for a 'crs' object and returns its 'properties.name' if present.
+    """
+    if not buffer:
+        return None
+
+    idx = buffer.lower().find('"features"')
+    if idx == -1:
+        return None
+
+    header = buffer[:idx]
+    first_brace = header.find("{")
+    if first_brace == -1:
+        return None
+
+    candidate = header[first_brace:]
+    candidate = candidate.rstrip(", \r\n\t")
+    candidate = candidate + "}"
+
+    try:
+        parsed = json.loads(candidate)
+    except Exception:
+        return None
+
+    crs = parsed.get("crs")
+    if isinstance(crs, dict):
+        props = crs.get("properties") or {}
+        name = props.get("name")
+        if isinstance(name, str):
+            return name
+
+    return None
