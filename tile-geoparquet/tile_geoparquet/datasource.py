@@ -6,8 +6,6 @@ from pathlib import Path
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.compute as pc
-import numpy as np
-
 logger = logging.getLogger(__name__)
 
 
@@ -163,54 +161,56 @@ class GeoJSONSource(DataSource):
         return self._build_table_from_features(first_batch)
 
     def _build_table_from_features(self, features: List[Dict[str, Any]]) -> pa.Table:
-        from shapely.geometry import shape as shapely_shape
-
         rows_props: List[Dict[str, Any]] = []
-        wkb_list: List[Any] = []
+        geometries: List[Any] = []
 
         for feat in features:
-            props = feat.get("properties") or {}
-            geom = feat.get("geometry", None)
+            rows_props.append(feat.get("properties") or {})
+            geometries.append(feat.get("geometry", None))
 
-            if geom is None:
-                wkb = None
-            else:
-                try:
-                    g = shapely_shape(geom)
-                    wkb = g.wkb if g is not None else None
-                except Exception:
-                    wkb = None
+        return self._build_table_from_rows(rows_props, geometries)
 
-            rows_props.append(props)
-            wkb_list.append(wkb)
+    def _build_table_from_rows(self, rows_props: List[Dict[str, Any]], geometries: List[Any]) -> pa.Table:
+        props_table = pa.Table.from_pylist(rows_props)
+        wkb_list = _geometries_to_wkb(geometries)
+        geometry_col = pa.array(wkb_list, type=pa.binary())
 
-        return self._build_table_from_rows(rows_props, wkb_list)
+        if props_table.num_columns == 0:
+            return pa.table([geometry_col], names=["geometry"])
 
-    def _build_table_from_rows(self, rows_props: List[Dict[str, Any]], wkb_list: List[Any]) -> pa.Table:
-        # Gather union of keys
-        all_keys: List[str] = []
-        seen_keys = set()
-        for d in rows_props:
-            for k in d.keys():
-                if k not in seen_keys:
-                    seen_keys.add(k)
-                    all_keys.append(k)
+        return props_table.append_column("geometry", geometry_col)
 
-        # Build columns as lists aligned with rows
-        cols: List[pa.Array] = []
-        names: List[str] = []
 
-        for k in all_keys:
-            col_py = [row.get(k, None) for row in rows_props]
-            cols.append(pa.array(col_py))
-            names.append(k)
+def _geometries_to_wkb(geometries: List[Any]) -> List[Any]:
+    """
+    Vectorized geometry -> WKB conversion using shapely's GeoJSON reader.
 
-        # Geometry column (binary)
-        wkb_arr = pa.array(np.array(wkb_list, dtype=object), type=pa.binary())
-        cols.append(wkb_arr)
-        names.append("geometry")
+    Converting via shapely.geometry.shape per-feature is expensive for large
+    files. Using shapely.from_geojson on an array of compact JSON strings keeps
+    the heavy work inside GEOS and removes most Python-level loops.
+    """
+    from shapely import from_geojson, to_wkb
 
-        return pa.table(cols, names=names)
+    wkb: List[Any] = [None] * len(geometries)
+    non_null_idx: List[int] = []
+    geojson_strings: List[str] = []
+
+    for idx, geom in enumerate(geometries):
+        if geom is None:
+            continue
+        non_null_idx.append(idx)
+        geojson_strings.append(json.dumps(geom, separators=(",", ":")))
+
+    if not geojson_strings:
+        return wkb
+
+    shapely_geoms = from_geojson(geojson_strings)
+    encoded = to_wkb(shapely_geoms, hex=False).tolist()
+
+    for idx, val in zip(non_null_idx, encoded):
+        wkb[idx] = val
+
+    return wkb
 
     def _finalize_chunk(self, chunk: pa.Table) -> Optional[pa.Table]:
         if chunk is None or chunk.num_rows == 0:
