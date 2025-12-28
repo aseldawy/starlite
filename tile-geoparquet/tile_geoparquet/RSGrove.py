@@ -154,13 +154,16 @@ def _overlap_volume(a: EnvelopeNDLite, b: EnvelopeNDLite) -> float:
 
 def _choose_split(coords: np.ndarray,
                   idx: np.ndarray,
+                  start: int,
+                  end: int,
                   w: Optional[np.ndarray],
                   m: float,
                   M: float,
-                  fraction_min_split: float) -> Tuple[np.ndarray, np.ndarray]:
+                  fraction_min_split: float) -> int:
     """
     R*-style split selection on the given subset (indices idx).
-    Returns (left_idx, right_idx) as index arrays into 'idx'.
+    Sorts the target slice of idx in-place by the chosen axis and returns the
+    split position within that slice.
     - Examine each axis
     - For each axis, sort by coordinate, consider candidate split positions
       respecting m (min on each side) and (M) capacity target (soft). We allow
@@ -170,29 +173,27 @@ def _choose_split(coords: np.ndarray,
     - Tie-breaker: minimal total area
     """
     D, _ = coords.shape
-    n = idx.size
+    n = end - start
     assert n >= 2, "Need at least 2 points to split"
 
-    # Build weights (default = 1)
-    if w is None:
-        ww = np.ones(n, dtype=float)
-    else:
-        ww = w[idx].astype(float, copy=False)
-
+    subset = idx[start:end]
     # Candidate split positions must leave >= m on each side (in weight terms).
-    # Convert m (min) to weight floor if using weights; otherwise count floor.
-    total_w = float(np.sum(ww))
+    if w is None:
+        total_w = float(n)
+    else:
+        total_w = float(np.sum(w[subset]))
     min_side_w = float(m) if w is None else float(m)  # already weight for weighted mode
     # Boundaries in index space: we'll use cumulative weights to honor m and M
     # Build a helper over a sorted order per axis, so thresholds translate via prefix sums.
 
     best = None  # (score_margin, score_overlap, score_area, axis, k_split, order)
-    best_lr = None
+    best_order = None
+    best_k = None
 
     for axis in range(D):
-        order = idx[np.argsort(coords[axis, idx], kind="mergesort")]
-        vals = coords[axis, order]
-        w_sorted = ww[np.argsort(coords[axis, idx], kind="mergesort")]
+        order_list = sorted(subset.tolist(), key=lambda i: coords[axis, i])
+        order = np.fromiter(order_list, dtype=idx.dtype, count=n)
+        w_sorted = np.ones(n, dtype=float) if w is None else w[order].astype(float, copy=False)
 
         prefix = np.cumsum(w_sorted)  # cum weights
         # valid split positions are between elements: at k means left=[0:k], right=[k:n]
@@ -218,7 +219,6 @@ def _choose_split(coords: np.ndarray,
 
         # Evaluate candidates on R*-criteria
         best_axis = None
-        best_axis_lr = None
         for k in k_candidates:
             left_ids = order[:k+1]   # include element k on the left
             right_ids = order[k+1:]
@@ -235,64 +235,68 @@ def _choose_split(coords: np.ndarray,
             cand = (score_margin, score_overlap, score_area)
             if (best_axis is None) or (cand < best_axis):
                 best_axis = cand
-                best_axis_lr = (left_ids, right_ids)
+                best_axis_k = k + 1  # split position (exclusive)
 
         if best_axis is None:
             continue
 
         if (best is None) or (best_axis < best[:3]):
             best = (*best_axis, axis)
-            best_lr = best_axis_lr
+            best_order = order
+            best_k = best_axis_k
 
-    if best_lr is None:
-        # ultimate fallback: split by first axis median
-        order = idx[np.argsort(coords[0, idx], kind="mergesort")]
-        k = order.size // 2
-        return order[:k], order[k:]
-    return best_lr
+    if best_order is None or best_k is None:
+        order_list = sorted(subset.tolist(), key=lambda i: coords[0, i])
+        best_order = np.fromiter(order_list, dtype=idx.dtype, count=n)
+        best_k = n // 2
+
+    idx[start:end] = best_order
+    split_at = start + best_k
+    return split_at
 
 
-def _rstar_partition_recursive(coords: np.ndarray,
+def _rstar_partition_iterative(coords: np.ndarray,
                                idx: np.ndarray,
                                w: Optional[np.ndarray],
                                min_cap: float,
                                max_cap: float,
                                fraction_min_split: float,
-                               out_boxes: List[EnvelopeNDLite],
-                               depth: int = 0):
+                               out_boxes: List[EnvelopeNDLite]):
     """
-    Recursively partition indices into boxes with capacity in [min_cap, max_cap]
+    Iteratively partition indices into boxes with capacity in [min_cap, max_cap]
     (capacity = count if w is None, else sum(weights) when w provided).
     """
     import logging
-    logger = logging.getLogger("RSGrovePartitioner._rstar_partition_recursive")
-    logger.debug(f"Recursion depth {depth}, idx.size={idx.size}")
-    if idx.size == 0:
-        logger.debug(f"Recursion depth {depth}: idx.size == 0, returning.")
-        return
+    logger = logging.getLogger("RSGrovePartitioner._rstar_partition_iterative")
+    stack: List[Tuple[int, int]] = [(0, idx.size)]
 
-    if w is None:
-        cap_here = float(idx.size)
-    else:
-        cap_here = float(np.sum(w[idx]))
+    while stack:
+        start, end = stack.pop()
+        subset_size = end - start
+        logger.debug(f"Stack pop start={start}, end={end}, subset_size={subset_size}")
+        if subset_size <= 0:
+            continue
 
-    logger.debug(f"Recursion depth {depth}: cap_here={cap_here}, max_cap={max_cap}")
-    if cap_here <= max_cap:
-        logger.debug(f"Recursion depth {depth}: cap_here <= max_cap, creating box.")
-        out_boxes.append(_bbox_from_indices(coords, idx))
-        return
+        if w is None:
+            cap_here = float(subset_size)
+        else:
+            cap_here = float(np.sum(w[idx[start:end]]))
 
-    left, right = _choose_split(coords, idx, w, min_cap, max_cap, fraction_min_split)
-    logger.debug(f"Recursion depth {depth}: left.size={left.size}, right.size={right.size}")
+        logger.debug(f"Subset start={start}, end={end}: cap_here={cap_here}, max_cap={max_cap}")
+        if cap_here <= max_cap:
+            logger.debug(f"Subset start={start}, end={end}: within capacity, creating box.")
+            out_boxes.append(_bbox_from_indices(coords, idx[start:end]))
+            continue
 
-    # Ensure both sides make progress (avoid pathological empty splits)
-    if left.size == 0 or right.size == 0:
-        logger.warning(f"Recursion depth {depth}: Pathological split detected, splitting by median.")
-        k = idx.size // 2
-        left, right = idx[:k], idx[k:]
+        split_at = _choose_split(coords, idx, start, end, w, min_cap, max_cap, fraction_min_split)
+        logger.debug(f"Subset start={start}, end={end}: split_at={split_at}")
 
-    _rstar_partition_recursive(coords, left, w, min_cap, max_cap, fraction_min_split, out_boxes, depth + 1)
-    _rstar_partition_recursive(coords, right, w, min_cap, max_cap, fraction_min_split, out_boxes, depth + 1)
+        if split_at <= start or split_at >= end:
+            logger.warning(f"Subset start={start}, end={end}: Pathological split detected, splitting by median.")
+            split_at = start + subset_size // 2
+
+        stack.append((split_at, end))
+        stack.append((start, split_at))
 
 
 def partition_points(coords: np.ndarray,
@@ -302,14 +306,9 @@ def partition_points(coords: np.ndarray,
                      fraction_min_split: float) -> list:
     import logging
     logger = logging.getLogger("RSGrovePartitioner.partition_points")
-    boxes = []
-    logger.info(f"Starting _rstar_partition_recursive with {coords.shape[1]} points.")
-    _rstar_partition_recursive(coords, np.arange(coords.shape[1], dtype=np.int64), None, float(min_cap), float(max_cap), fraction_min_split, boxes)
-    logger.info(f"_rstar_partition_recursive completed. {len(boxes)} boxes created.")
-    if expand_to_inf and boxes:
-        logger.info("Expanding boxes to infinity.")
-        boxes = _expand_to_infinity(boxes)
-    return boxes
+    weights = np.ones(coords.shape[1], dtype=float)
+    logger.info(f"Starting partition_weighted_points with {coords.shape[1]} points (uniform weights).")
+    return partition_weighted_points(coords, weights, float(min_cap), float(max_cap), expand_to_inf, fraction_min_split)
 
 
 def partition_weighted_points(coords: np.ndarray,
@@ -319,10 +318,10 @@ def partition_weighted_points(coords: np.ndarray,
                               expand_to_inf: bool,
                               fraction_min_split: float) -> List[EnvelopeNDLite]:
     """Weighted partitioning (capacities based on data sizes)."""
-    D, N = coords.shape
+    _, N = coords.shape
     idx = np.arange(N, dtype=np.int64)
     boxes: List[EnvelopeNDLite] = []
-    _rstar_partition_recursive(coords, idx, weights.astype(float), float(min_cap_w), float(max_cap_w),
+    _rstar_partition_iterative(coords, idx, weights.astype(float), float(min_cap_w), float(max_cap_w),
                                fraction_min_split, boxes)
     if expand_to_inf and boxes:
         boxes = _expand_to_infinity(boxes)
