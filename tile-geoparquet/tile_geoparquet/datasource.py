@@ -181,37 +181,6 @@ class GeoJSONSource(DataSource):
         return props_table.append_column("geometry", geometry_col)
 
 
-def _geometries_to_wkb(geometries: List[Any]) -> List[Any]:
-    """
-    Vectorized geometry -> WKB conversion using shapely's GeoJSON reader.
-
-    Converting via shapely.geometry.shape per-feature is expensive for large
-    files. Using shapely.from_geojson on an array of compact JSON strings keeps
-    the heavy work inside GEOS and removes most Python-level loops.
-    """
-    from shapely import from_geojson, to_wkb
-
-    wkb: List[Any] = [None] * len(geometries)
-    non_null_idx: List[int] = []
-    geojson_strings: List[str] = []
-
-    for idx, geom in enumerate(geometries):
-        if geom is None:
-            continue
-        non_null_idx.append(idx)
-        geojson_strings.append(json.dumps(geom, separators=(",", ":")))
-
-    if not geojson_strings:
-        return wkb
-
-    shapely_geoms = from_geojson(geojson_strings)
-    encoded = to_wkb(shapely_geoms, hex=False).tolist()
-
-    for idx, val in zip(non_null_idx, encoded):
-        wkb[idx] = val
-
-    return wkb
-
     def _finalize_chunk(self, chunk: pa.Table) -> Optional[pa.Table]:
         if chunk is None or chunk.num_rows == 0:
             return None
@@ -255,6 +224,38 @@ def _geometries_to_wkb(geometries: List[Any]) -> List[Any]:
             else:
                 out_cols.append(pa.nulls(t.num_rows, type=fld.type))
         return pa.table(out_cols, names=[f.name for f in schema])
+
+
+def _geometries_to_wkb(geometries: List[Any]) -> List[Any]:
+    """
+    Vectorized geometry -> WKB conversion using shapely's GeoJSON reader.
+
+    Converting via shapely.geometry.shape per-feature is expensive for large
+    files. Using shapely.from_geojson on an array of compact JSON strings keeps
+    the heavy work inside GEOS and removes most Python-level loops.
+    """
+    from shapely import from_geojson, to_wkb
+
+    wkb: List[Any] = [None] * len(geometries)
+    non_null_idx: List[int] = []
+    geojson_strings: List[str] = []
+
+    for idx, geom in enumerate(geometries):
+        if geom is None:
+            continue
+        non_null_idx.append(idx)
+        geojson_strings.append(json.dumps(geom, separators=(",", ":")))
+
+    if not geojson_strings:
+        return wkb
+
+    shapely_geoms = from_geojson(geojson_strings)
+    encoded = to_wkb(shapely_geoms, hex=False).tolist()
+
+    for idx, val in zip(non_null_idx, encoded):
+        wkb[idx] = val
+
+    return wkb
 
 
 def _iter_geojson_feature_batches_with_ijson(path: str, batch_size: int) -> Iterable[List[Dict[str, Any]]]:

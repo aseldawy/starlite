@@ -318,7 +318,7 @@ def _choose_split(coords: np.ndarray,
 
     for axis in range(D):
         _quicksort_inplace(axis)
-        left_min, left_max, right_min, right_max = _compute_bounds()
+        # left_min, left_max, right_min, right_max = _compute_bounds()
 
         if has_weights:
             prefix = np.cumsum(w[start:end]).astype(float, copy=False)  # cum weights
@@ -343,7 +343,7 @@ def _choose_split(coords: np.ndarray,
                 if hi <= lo:  # ensure at least one candidate
                     lo = 0; hi = len(k_valid)
                 k_valid = k_valid[lo:hi]
-        k_candidates = k_valid.tolist()
+            k_candidates = k_valid.tolist()
 
         # Evaluate candidates on R*-criteria
         best_axis, best_axis_k = _best_split_for_axis(k_candidates)
