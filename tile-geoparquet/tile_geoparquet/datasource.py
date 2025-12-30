@@ -144,15 +144,17 @@ class GeoJSONSource(DataSource):
             geometry_col = pa.array(gdf.geometry.to_wkb(), type=pa.binary())
             props_df = gdf.drop(columns="geometry")
             props_table = pa.Table.from_pandas(props_df, preserve_index=False)
-            table = (
+            raw_table = (
                 pa.table([geometry_col], names=["geometry"])
                 if props_table.num_columns == 0
                 else props_table.append_column("geometry", geometry_col)
             )
-            # Attach GeoParquet metadata with CRS
-            schema_with_geo = _attach_geoparquet_metadata(table.schema, crs_value)
-            table = table.replace_schema_metadata(schema_with_geo.metadata)
-            self._schema = schema_with_geo
+
+            # Enforce a stable schema across all batches to avoid mixed Arrow types (e.g., int64 vs double).
+            self._schema = self._unify_schema_with(raw_table.schema, crs_value)
+            coerced = self._coerce_to_schema(raw_table, self._schema)
+            table = coerced.replace_schema_metadata(self._schema.metadata).combine_chunks()
+
             logger.info(
                 "GeoJSON batch %d (%d rows) -> %d columns (including 'geometry')",
                 batch_index,
@@ -228,16 +230,42 @@ class GeoJSONSource(DataSource):
                 col = t[name]
                 if not col.type.equals(fld.type):
                     try:
-                        col = col.cast(fld.type)
-                    except Exception:
-                        logger.warning(
-                            "Type mismatch for column '%s': %s -> %s (kept original)",
-                            name, col.type, fld.type
-                        )
-                out_cols.append(col)
+                        col = col.cast(fld.type, safe=False)
+                    except Exception as exc:
+                        raise TypeError(
+                            f"GeoJSONSource schema coercion failed for column '{name}': {col.type} -> {fld.type}"
+                        ) from exc
+                out_cols.append(col.combine_chunks())
             else:
                 out_cols.append(pa.nulls(t.num_rows, type=fld.type))
         return pa.table(out_cols, names=[f.name for f in schema])
+
+    def _unify_schema_with(self, other_schema: pa.Schema, crs_value: str) -> pa.Schema:
+        """
+        Widen the stored schema to accommodate differing incoming types (e.g., int64 vs double).
+        Uses pyarrow.unify_schemas(promote=True) to select a common supertype, then reapplies
+        GeoParquet metadata so downstream writers see a stable schema.
+        """
+        base_md = self._schema.metadata if self._schema is not None else None
+
+        if self._schema is None:
+            return _attach_geoparquet_metadata(other_schema, crs_value)
+
+        try:
+            unified = pa.unify_schemas(
+                [self._schema.remove_metadata(), other_schema.remove_metadata()],
+                promote=True,
+            )
+        except Exception:
+            unified = pa.unify_schemas(
+                [self._schema.remove_metadata(), other_schema.remove_metadata()]
+            )
+
+        md = base_md or {}
+        if b"geo" not in md:
+            md = _attach_geoparquet_metadata(pa.schema(unified), crs_value).metadata
+
+        return pa.schema(unified, metadata=md)
 
 
 def _geometries_to_wkb(geometries: List[Any]) -> List[Any]:
