@@ -281,6 +281,7 @@ from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import numpy as np
 import pyarrow as pa
+from pyarrow import types as pat
 import pyarrow.parquet as pq
 from shapely import from_wkb
 
@@ -395,7 +396,8 @@ class WriterPool:
 
         def _finalize_one_tile(tile_id: str, batches: List[pa.Table]) -> str:
             logger.debug(f"[{tile_id}] Concatenating {len(batches)} batches.")
-            full = pa.concat_tables(batches, promote=True)
+            aligned_batches, _ = self._align_schemas(batches)
+            full = pa.concat_tables(aligned_batches, promote=False)
             full = ensure_large_types(full, self.geom_col)
 
             # 🔽 Drop the internal routing column if it exists
@@ -540,3 +542,73 @@ class WriterPool:
         meta[b"geo"] = json.dumps(geo).encode("utf8")
 
         return tbl.replace_schema_metadata(meta)
+
+    # ------------------------- Schema alignment -----------------------
+
+    def _align_schemas(self, batches: List[pa.Table]) -> Tuple[List[pa.Table], Optional[pa.Schema]]:
+        """
+        Ensure all batches share a compatible schema before concatenation by
+        promoting differing numeric columns (e.g., int64 vs double) to a common type.
+        """
+        if not batches:
+            return batches, None
+        if len(batches) == 1:
+            return batches, batches[0].schema
+
+        target_fields: Dict[str, pa.Field] = {f.name: f for f in batches[0].schema}
+        column_order = list(batches[0].schema.names)
+        for tbl in batches[1:]:
+            for fld in tbl.schema:
+                existing = target_fields.get(fld.name)
+                if existing is None:
+                    target_fields[fld.name] = fld
+                    column_order.append(fld.name)
+                    continue
+                if existing.type.equals(fld.type):
+                    continue
+                promoted = self._promote_field(existing, fld)
+                if promoted is None:
+                    logger.warning(
+                        "Unable to promote column '%s' types (%s vs %s); keeping existing type.",
+                        fld.name,
+                        existing.type,
+                        fld.type,
+                    )
+                    continue
+                target_fields[fld.name] = promoted
+
+        target_schema = pa.schema(
+            [target_fields[name] for name in column_order],
+            metadata=batches[0].schema.metadata,
+        )
+
+        aligned: List[pa.Table] = []
+        for tbl in batches:
+            if tbl.schema.equals(target_schema, check_metadata=False):
+                aligned.append(tbl)
+            else:
+                aligned.append(tbl.cast(target_schema, safe=False))
+
+        return aligned, target_schema
+
+    @staticmethod
+    def _promote_field(left: pa.Field, right: pa.Field) -> Optional[pa.Field]:
+        """
+        Promote two fields to a common numeric type when possible.
+        Currently supports integer/floating-point promotion to avoid merge errors.
+        """
+        lt, rt = left.type, right.type
+        if pat.is_floating(lt) or pat.is_floating(rt):
+            promoted_type = pa.float64()
+        elif pat.is_integer(lt) and pat.is_integer(rt):
+            promoted_type = pa.int64()
+        else:
+            return None
+
+        metadata = left.metadata or right.metadata
+        return pa.field(
+            left.name,
+            promoted_type,
+            nullable=left.nullable or right.nullable,
+            metadata=metadata,
+        )
