@@ -144,15 +144,21 @@ class GeoJSONSource(DataSource):
             geometry_col = pa.array(gdf.geometry.to_wkb(), type=pa.binary())
             props_df = gdf.drop(columns="geometry")
             props_table = pa.Table.from_pandas(props_df, preserve_index=False)
-            table = (
+            raw_table = (
                 pa.table([geometry_col], names=["geometry"])
                 if props_table.num_columns == 0
                 else props_table.append_column("geometry", geometry_col)
             )
-            # Attach GeoParquet metadata with CRS
-            schema_with_geo = _attach_geoparquet_metadata(table.schema, crs_value)
-            table = table.replace_schema_metadata(schema_with_geo.metadata)
-            self._schema = schema_with_geo
+
+            # Enforce a stable schema across all batches to avoid mixed Arrow types (e.g., int64 vs double).
+            if self._schema is None:
+                schema_with_geo = _attach_geoparquet_metadata(raw_table.schema, crs_value)
+                self._schema = schema_with_geo
+                table = raw_table.replace_schema_metadata(schema_with_geo.metadata).combine_chunks()
+            else:
+                coerced = self._coerce_to_schema(raw_table, self._schema)
+                table = coerced.replace_schema_metadata(self._schema.metadata).combine_chunks()
+
             logger.info(
                 "GeoJSON batch %d (%d rows) -> %d columns (including 'geometry')",
                 batch_index,
