@@ -286,8 +286,11 @@ class RoundOrchestrator:
         round_id = 0
         ds: DataSource = self.source
 
+        from time import perf_counter
+        start_time = perf_counter()
         while True:
             overflow_path = self._run_one_round(ds, round_id, records_per_round=self.records_per_round)
+            logger.info("Round %d finished in %.2f seconds", round_id, perf_counter() - start_time)
             if overflow_path is None:
                 break
 

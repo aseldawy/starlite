@@ -85,7 +85,7 @@ class GeoJSONSource(DataSource):
     def __init__(
         self,
         path: str,
-        batch_rows: int = 50_000,
+        batch_rows: int = 100_000,
         src_crs: str = "EPSG:4326",
         target_crs: Optional[str] = None,
         keep_null_geoms: bool = False,
@@ -120,11 +120,13 @@ class GeoJSONSource(DataSource):
         if self._schema is None:
             first = self._read_first_batch()
             if first is None or first.num_rows == 0:
+                # Empty input file. Create a minimal schema with geometry column.
                 base = pa.schema([("geometry", pa.binary())])
                 self._schema = _attach_geoparquet_metadata(
                     base, self._crs_hint or self.target_crs or self.src_crs
                 )
             else:
+                # Lock schema with GeoParquet metadata
                 self._schema = _attach_geoparquet_metadata(
                     first.schema, self._crs_hint or self.target_crs or self.src_crs
                 )

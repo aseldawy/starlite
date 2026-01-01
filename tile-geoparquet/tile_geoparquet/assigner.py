@@ -1,7 +1,6 @@
 from __future__ import annotations
 from typing import Dict, List, Optional, Tuple, Iterable
 import logging
-from time import perf_counter
 import numpy as np
 import pandas as pd
 import pyarrow as pa
@@ -151,8 +150,6 @@ class RSGroveAssigner:
             num_partitions, seed, sample_ratio, str(sample_cap), geom_col
         )
 
-        sample_start = perf_counter()
-
         for tb in tables:
             n_batches += 1
             t = tb.combine_chunks()
@@ -177,18 +174,11 @@ class RSGroveAssigner:
                 reservoir_add(n_seen + 1, float(c.x), float(c.y))
                 n_seen += 1
 
-        sample_end = perf_counter()
-
         if not X_s:
             raise ValueError("No geometries sampled to build RSGrove index. "
                              "Increase --sample-ratio or provide --sample-cap.")
-        logger.info(
-            "Sampling complete in %.2f seconds: total_seen=%d, total_sampled=%d, batches=%d",
-            sample_end - sample_start,
-            n_seen,
-            len(X_s),
-            n_batches,
-        )
+        logger.info("Sampling complete: total_seen=%d, total_sampled=%d, batches=%d",
+                    n_seen, len(X_s), n_batches)
 
         sample_points = np.stack(
             [np.asarray(X_s, dtype=np.float64), np.asarray(Y_s, dtype=np.float64)],
@@ -205,13 +195,9 @@ class RSGroveAssigner:
 
         summary = _Summary2D(mins, maxs)
 
-        partition_start = perf_counter()
-
         part = RSGrovePartitioner()
         part.setup(options, True)  # disjoint
         part.construct(summary, sample_points, None, int(num_partitions))
-
-        partition_end = perf_counter()
 
         P = part.numPartitions()
         boxes: List[Tuple[int, float, float, float, float]] = []
@@ -229,7 +215,7 @@ class RSGroveAssigner:
             logger.warning("Failed to write partition debug CSV: %s", e)
 
         env = EnvelopeNDLite(mins.copy(), maxs.copy())
-        logger.info("Partitioner built in %.2f seconds: partitions=%d", partition_end - partition_start, part.numPartitions())
+        logger.info("Partitioner built: partitions=%d", part.numPartitions())
         return cls(part, env, geom_col=geom_col, boxes=boxes)
 
     def tile_bbox(self, tile_id: str) -> Optional[Tuple[float, float, float, float]]:
@@ -275,6 +261,7 @@ class RSGroveAssigner:
             least MBR expansion to encompass the centroid (point-based).
           - Returns a table of partition IDs aligned with the input order.
         """
+        time_start = perf_counter()
         logger.info("[ASSIGNER] After ensure_large_types metadata: %s", tbl.schema.metadata)
 
         if tbl.num_rows == 0:
@@ -355,4 +342,6 @@ class RSGroveAssigner:
         out = pa.table({"partition_id": pa.array(partition_ids, type=pa.int32())})
 
         logger.info("partition_by_tile (center-first): input_rows=%d", t.num_rows)
+        time_end = perf_counter()
+        logger.info("partition_by_tile (center-first): time=%.3f seconds", time_end - time_start)
         return out
