@@ -148,9 +148,8 @@ def main():
             sample_ratio=args.sample_ratio,
             sample_cap=args.sample_cap,
         )
-        logger.info("RSGrove partitioner ready; proceeding to tiling.")
 
-    partition_run_start = perf_counter()
+
     orchestrator = RoundOrchestrator(
         source=source,
         assigner=assigner,

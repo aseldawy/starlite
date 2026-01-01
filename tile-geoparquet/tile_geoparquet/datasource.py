@@ -2,7 +2,6 @@ from typing import Iterable, Optional, List, Dict, Any, Tuple
 import logging
 import json
 from pathlib import Path
-
 import pyarrow as pa
 import pyarrow.parquet as pq
 import pyarrow.compute as pc

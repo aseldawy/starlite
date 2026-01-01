@@ -137,19 +137,6 @@ class AbstractHistogram(Protocol):
 
 
 # ----------------------------- R*-like splitter -------------------------------
-
-def _bbox_from_indices(coords: np.ndarray, idx: np.ndarray) -> EnvelopeNDLite:
-    # Backward compatibility shim: dispatch to slice-based computation.
-    # Expects idx to be a contiguous slice of positions.
-    if idx.ndim != 1:
-        raise ValueError("idx must be 1-D")
-    start = int(idx[0])
-    end = int(idx[-1]) + 1
-    mins = np.min(coords[:, start:end], axis=1)
-    maxs = np.max(coords[:, start:end], axis=1)
-    return EnvelopeNDLite(mins, maxs)
-
-
 def _bbox_from_slice(coords: np.ndarray, start: int, end: int) -> EnvelopeNDLite:
     # coords (D, N); slice over columns [start:end)
     mins = np.min(coords[:, start:end], axis=1)

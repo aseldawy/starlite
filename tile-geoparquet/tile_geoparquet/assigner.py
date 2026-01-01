@@ -261,7 +261,6 @@ class RSGroveAssigner:
             least MBR expansion to encompass the centroid (point-based).
           - Returns a table of partition IDs aligned with the input order.
         """
-        time_start = perf_counter()
         logger.info("[ASSIGNER] After ensure_large_types metadata: %s", tbl.schema.metadata)
 
         if tbl.num_rows == 0:
@@ -341,7 +340,6 @@ class RSGroveAssigner:
 
         out = pa.table({"partition_id": pa.array(partition_ids, type=pa.int32())})
 
-        logger.info("partition_by_tile (center-first): input_rows=%d", t.num_rows)
-        time_end = perf_counter()
-        logger.info("partition_by_tile (center-first): time=%.3f seconds", time_end - time_start)
+        logger.info("partition_by_tile (contains-only): input_rows=%d, tiles=%d",
+                    t.num_rows, len(out))
         return out
