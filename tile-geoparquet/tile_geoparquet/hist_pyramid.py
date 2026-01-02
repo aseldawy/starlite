@@ -131,7 +131,7 @@ def _accumulate_vertices_hist(
 # PROCESS ONE TILE
 # ---------------------------------------------------------------------------
 
-def _process_one_tile(parquet_path: Path, outdir: Path, cfg, geom_col: str) -> Path:
+def _process_one_tile(parquet_path: Path, cfg, geom_col: str) -> np.ndarray:
 
     tile_id = parquet_path.stem
     logger.info(f"Processing tile: {tile_id}")
@@ -158,29 +158,27 @@ def _process_one_tile(parquet_path: Path, outdir: Path, cfg, geom_col: str) -> P
         )
         base += hist
 
-    out_path = outdir / f"{tile_id}_L0.npy"
-    np.save(out_path, base, allow_pickle=False)
-
-    return out_path
+    return base
 
 
 # ---------------------------------------------------------------------------
 # GLOBAL SUM AND PREFIX SUM
 # ---------------------------------------------------------------------------
 
-def _sum_all_tiles(tile_files: List[Path], outdir: Path, dtype="float64") -> Path:
+def _sum_all_tiles(tile_hists: List[np.ndarray], outdir: Path, dtype="float64") -> Path:
 
-    if not tile_files:
+    if not tile_hists:
         raise RuntimeError("No tile histograms generated")
 
-    example = np.load(tile_files[0], mmap_mode="r")
+    example = tile_hists[0]
     total = np.zeros_like(example, dtype=dtype)
 
-    for f in tile_files:
-        arr = np.load(f, mmap_mode="r")
-        if arr.shape != total.shape:
-            raise ValueError(f"Tile {f} has shape {arr.shape}, expected {total.shape}")
-        total += arr
+    for hist in tile_hists:
+        if hist.shape != total.shape:
+            raise ValueError(
+                f"Tile histogram has shape {hist.shape}, expected {total.shape}"
+            )
+        total += hist
 
     global_path = outdir / "global.npy"
     np.save(global_path, total, allow_pickle=False)
@@ -214,9 +212,6 @@ def _sum_all_tiles(tile_files: List[Path], outdir: Path, dtype="float64") -> Pat
     }
     with open(outdir / "global_prefix.json", "w") as f:
         json.dump(prefix_json, f, indent=2)
-
-    for f in tile_files:
-        f.unlink(missing_ok=True)
 
     logger.info(f"Wrote global histogram: {global_path}")
     logger.info(f"Wrote global prefix sum histogram: {prefix_path}")
@@ -254,11 +249,9 @@ def build_histograms_for_dir(
 
     tile_outputs = []
 
-    from time import perf_counter
-    step1 = perf_counter()
     with ProcessPoolExecutor(max_workers=cfg.max_parallel_tiles) as ex:
         futures = {
-            ex.submit(_process_one_tile, p, outdir_p, cfg, geom_col): p
+            ex.submit(_process_one_tile, p, cfg, geom_col): p
             for p in tiles
         }
 
