@@ -11,7 +11,10 @@ from .orchestrator import RoundOrchestrator
 from .writer_pool import SortMode, SortKey
 from .hist_pyramid import build_histograms_for_dir
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(relativeCreated).0fms] %(levelname)s %(name)s: %(message)s",
+)
 logger = logging.getLogger(__name__)
 
 
