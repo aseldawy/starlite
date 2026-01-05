@@ -362,11 +362,15 @@ class WriterPool:
         else:
             self.max_parallel_files = max(1, int(max_parallel_files))
 
-        self._buffers: Dict[str, List[pa.Table]] = defaultdict(list)
+        self._buffers: Dict[int, List[pa.Table]] = defaultdict(list)
 
     # --------------------------- Public API ---------------------------
 
-    def append(self, tile_id: str, table: pa.Table) -> None:
+    @staticmethod
+    def _tile_label(tile_id: int) -> str:
+        return f"tile_{tile_id:06d}"
+
+    def append(self, tile_id: int, table: pa.Table) -> None:
         logger.debug("\n--- DEBUG: WriterPool.append ---")
         logger.debug("Incoming metadata: %s", table.schema.metadata)
 
@@ -393,14 +397,15 @@ class WriterPool:
         logger.info(f"WriterPool.flush_all(): {total} tiles buffered → flushing in {rounds} round(s), "
                     f"{mpf} parallel writes per round.")
 
-        def _finalize_one_tile(tile_id: str, batches: List[pa.Table]) -> str:
-            logger.debug(f"[{tile_id}] Concatenating {len(batches)} batches.")
+        def _finalize_one_tile(tile_id: int, batches: List[pa.Table]) -> str:
+            label = self._tile_label(tile_id)
+            logger.debug(f"[{label}] Concatenating {len(batches)} batches.")
             full = pa.concat_tables(batches, promote=True)
             full = ensure_large_types(full, self.geom_col)
 
             # 🔽 Drop the internal routing column if it exists
             if "geo_parquet_tile_num" in full.column_names:
-                logger.debug(f"[{tile_id}] Dropping internal column 'geo_parquet_tile_num'")
+                logger.debug(f"[{label}] Dropping internal column 'geo_parquet_tile_num'")
                 full = full.drop(["geo_parquet_tile_num"])
 
             bbox, full = self._maybe_sort_and_bbox(full)
@@ -409,12 +414,12 @@ class WriterPool:
             safe = lambda v: f"{v:.6f}".replace(".", "_")
             bbox_str = f"{safe(minx)}_{safe(miny)}_{safe(maxx)}_{safe(maxy)}"
 
-            filename = f"{tile_id}__{bbox_str}.parquet"
+            filename = f"{label}__{bbox_str}.parquet"
             out_path = os.path.join(self.outdir, filename)
 
-            logger.info(f"[{tile_id}] Writing to disk → {out_path}")
+            logger.info(f"[{label}] Writing to disk → {out_path}")
             pq.write_table(full, out_path, compression=self.compression, **self._pq_args)
-            logger.debug(f"[{tile_id}] Flush complete, rows={full.num_rows}")
+            logger.debug(f"[{label}] Flush complete, rows={full.num_rows}")
             return out_path
 
         for r in range(rounds):

@@ -64,7 +64,7 @@ class _OverflowWriter:
             self._pw.close()
         return self._rows
 
-    def write_batch(self, tbl: pa.Table, tile_id: Optional[str] = None) -> None:
+    def write_batch(self, tbl: pa.Table, tile_id: Optional[int] = None) -> None:
         if tbl is None or tbl.num_rows == 0:
             return
 
@@ -74,7 +74,7 @@ class _OverflowWriter:
         # Inject persistent tile column if available
         if tile_id is not None:
             try:
-                tid_num = int(tile_id.split("_")[-1])
+                tid_num = int(tile_id)
             except Exception:
                 tid_num = -1
             if _TILE_COL not in tbl.column_names:
@@ -131,7 +131,11 @@ class RoundOrchestrator:
 
     # ------------------------------------------------------------------
 
-    def _group_by_tile_column(self, batch: pa.Table) -> Dict[str, pa.Table]:
+    @staticmethod
+    def _tile_label(tile_id: int) -> str:
+        return f"tile_{tile_id:06d}"
+
+    def _group_by_tile_column(self, batch: pa.Table) -> Dict[int, pa.Table]:
         """Group a batch by the persistent tile column (geo_parquet_tile_num)."""
         col = batch[_TILE_COL]
         arr = col.to_numpy(zero_copy_only=False)
@@ -145,12 +149,12 @@ class RoundOrchestrator:
                 continue
             groups.setdefault(v_int, []).append(i)
 
-        out: Dict[str, pa.Table] = {}
+        out: Dict[int, pa.Table] = {}
         for tid, idxs in groups.items():
-            out[f"tile_{tid:06d}"] = batch.take(pa.array(idxs, type=pa.int32()))
+            out[tid] = batch.take(pa.array(idxs, type=pa.int32()))
         return out
 
-    def _group_by_partition_ids(self, batch: pa.Table, partitions: pa.Table) -> Dict[str, pa.Table]:
+    def _group_by_partition_ids(self, batch: pa.Table, partitions: pa.Table) -> Dict[int, pa.Table]:
         """Group a batch using the partition_id table returned by the assigner."""
         if partitions.num_rows != batch.num_rows:
             raise ValueError("Partition table must align with batch row count")
@@ -168,9 +172,9 @@ class RoundOrchestrator:
                 continue
             groups.setdefault(pid, []).append(i)
 
-        out: Dict[str, pa.Table] = {}
+        out: Dict[int, pa.Table] = {}
         for pid, idxs in groups.items():
-            out[f"tile_{pid:06d}"] = batch.take(pa.array(idxs, type=pa.int32()))
+            out[pid] = batch.take(pa.array(idxs, type=pa.int32()))
         return out
 
     # ------------------------------------------------------------------
@@ -201,7 +205,7 @@ class RoundOrchestrator:
             geom_col=self.geom_col,
         )
 
-        open_tiles: Set[str] = set()
+        open_tiles: Set[int] = set()
         cap = max(1, self.max_parallel_files - 1)
         batches: List[pa.Table] = []
         current_rows = 0
@@ -236,7 +240,7 @@ class RoundOrchestrator:
             for tile_id, sub in parts.items():
                 if tile_id in open_tiles or len(open_tiles) < cap:
                     if tile_id not in open_tiles:
-                        logger.debug("Round %d: admitting tile %s", round_id, tile_id)
+                        logger.debug("Round %d: admitting tile %s", round_id, self._tile_label(tile_id))
                         open_tiles.add(tile_id)
                     pool.append(tile_id, sub)
                 else:
