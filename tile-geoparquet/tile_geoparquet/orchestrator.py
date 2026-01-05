@@ -7,6 +7,7 @@ import logging
 
 import pyarrow as pa
 import pyarrow.parquet as pq
+from time import perf_counter
 
 from .datasource import DataSource, GeoParquetSource
 from .assigner import TileAssignerFromCSV
@@ -249,6 +250,7 @@ class RoundOrchestrator:
             batches = []
             current_rows = 0
 
+        start_time = perf_counter()
         batch_idx = -1
         for batch_idx, batch in enumerate(ds.iter_tables()):
             batches.append(batch)
@@ -257,6 +259,10 @@ class RoundOrchestrator:
                 process_accumulated(batch_idx)
 
         process_accumulated(batch_idx)
+        end_time = perf_counter()
+        logger.info(
+            "Round %d: processed %d batches in %.2f seconds",
+            round_id, batch_idx + 1, end_time - start_time)
 
         # Flush and handle overflow
         if open_tiles:
@@ -267,7 +273,10 @@ class RoundOrchestrator:
         else:
             logger.info("Round %d: no tiles admitted; only overflow will be produced (if any).", round_id)
 
+        start_time = perf_counter()
         pool.flush_all()
+        end_time = perf_counter()
+        logger.info("Round %d: flushed all writers in %.2f seconds", round_id, end_time - start_time)
 
         overflow_rows = ow.close()
         if overflow_rows > 0:

@@ -84,7 +84,7 @@ class GeoJSONSource(DataSource):
     def __init__(
         self,
         path: str,
-        batch_rows: int = 100_000,
+        batch_rows: int = 1_000,
         src_crs: str = "EPSG:4326",
         target_crs: Optional[str] = None,
         keep_null_geoms: bool = False,
@@ -170,14 +170,12 @@ class GeoJSONSource(DataSource):
         """Read the first batch of features to establish the schema."""
         feature_iter = _iter_geojson_feature_batches(self.path, max(1, self.batch_rows), self._use_geojsonl)
         try:
-            first_batch = next(feature_iter)
+            features = next(feature_iter)
         except StopIteration:
             logger.info("GeoJSON read returned 0 rows when inferring schema")
             return None
 
-        return self._build_table_from_features(first_batch)
-
-    def _build_table_from_features(self, features: List[Dict[str, Any]]) -> pa.Table:
+        # Separate geometries and properties to prepare for Arrow conversion
         rows_props: List[Dict[str, Any]] = []
         geometries: List[Any] = []
 
@@ -185,9 +183,7 @@ class GeoJSONSource(DataSource):
             rows_props.append(feat.get("properties") or {})
             geometries.append(feat.get("geometry", None))
 
-        return self._build_table_from_rows(rows_props, geometries)
-
-    def _build_table_from_rows(self, rows_props: List[Dict[str, Any]], geometries: List[Any]) -> pa.Table:
+        # Convert to Arrow Table
         props_table = pa.Table.from_pylist(rows_props)
         wkb_list = _geometries_to_wkb(geometries)
         geometry_col = pa.array(wkb_list, type=pa.binary())
@@ -197,31 +193,6 @@ class GeoJSONSource(DataSource):
 
         return props_table.append_column("geometry", geometry_col)
 
-
-    def _finalize_chunk(self, chunk: pa.Table) -> Optional[pa.Table]:
-        if chunk is None or chunk.num_rows == 0:
-            return None
-
-        if "geometry" not in chunk.column_names:
-            raise ValueError("Missing 'geometry' column from GeoJSON reader")
-
-        tbl = chunk
-        if not self.keep_null_geoms:
-            mask_null = pc.is_null(tbl["geometry"])
-            if pc.any(mask_null).as_py():
-                tbl = tbl.filter(pc.invert(mask_null))
-
-        if tbl.num_rows == 0:
-            return None
-
-        if self._schema is None:
-            # Lock schema with GeoParquet metadata
-            self._schema = _attach_geoparquet_metadata(
-                tbl.schema, self._crs_hint or self.target_crs or self.src_crs
-            )
-
-        tbl = self._coerce_to_schema(tbl, self._schema).combine_chunks()
-        return tbl.replace_schema_metadata(self._schema.metadata)
 
     def _coerce_to_schema(self, t: pa.Table, schema: pa.Schema) -> pa.Table:
         if (t.schema.equals(schema)):
